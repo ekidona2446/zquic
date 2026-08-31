@@ -81,6 +81,7 @@ pub const TLS_LEGACY_VERSION: u16 = 0x0303;
 pub const SIG_ECDSA_SECP256R1_SHA256: u16 = 0x0403;
 pub const SIG_ECDSA_SECP384R1_SHA384: u16 = 0x0503;
 pub const SIG_RSA_PSS_RSAE_SHA256: u16 = 0x0804;
+pub const SIG_ED25519: u16 = 0x0807;
 
 // ALPN for HTTP/3
 pub const ALPN_H3 = "h3";
@@ -671,20 +672,27 @@ fn appendClientHelloPskKeyExchangeModes(ext_buf: []u8, ep: usize) usize {
 }
 
 /// RFC 8446 §4.2.3: TLS 1.3 ClientHello MUST include signature_algorithms.
+
+pub const client_sig_schemes = [_]u16{
+    SIG_ECDSA_SECP256R1_SHA256,
+    SIG_ECDSA_SECP384R1_SHA384,
+    SIG_RSA_PSS_RSAE_SHA256,
+    SIG_ED25519,
+};
+
 fn appendClientHelloSignatureAlgorithms(ext_buf: []u8, ep: usize) usize {
+    const list_len: u16 = 2 * client_sig_schemes.len;
     var p = ep;
     writeU16(ext_buf[p..], EXT_SIGNATURE_ALGORITHMS);
     p += 2;
-    writeU16(ext_buf[p..], 8); // ext data: list_len(2) + 3× u16 schemes
+    writeU16(ext_buf[p..], 2 + list_len); // ext data: list_len(2) + schemes
     p += 2;
-    writeU16(ext_buf[p..], 6); // signature list length in bytes
+    writeU16(ext_buf[p..], list_len); // signature list length in bytes
     p += 2;
-    writeU16(ext_buf[p..], SIG_ECDSA_SECP256R1_SHA256);
-    p += 2;
-    writeU16(ext_buf[p..], SIG_ECDSA_SECP384R1_SHA384);
-    p += 2;
-    writeU16(ext_buf[p..], SIG_RSA_PSS_RSAE_SHA256);
-    p += 2;
+    for (client_sig_schemes) |scheme| {
+        writeU16(ext_buf[p..], scheme);
+        p += 2;
+    }
     return p;
 }
 
