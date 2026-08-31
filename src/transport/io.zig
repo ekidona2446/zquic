@@ -3422,8 +3422,8 @@ pub const Server = struct {
         // before the kernel pushes them onto the simulated link.
         var sk_buf: i32 = 8 * 1024 * 1024;
         const sk_opt = std.mem.asBytes(&sk_buf);
-        std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, sk_opt) catch {};
-        std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, sk_opt) catch {};
+        compat.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, sk_opt);
+        compat.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, sk_opt);
         setupEcnSocket(sock);
 
         dbg("io: server bound on 0.0.0.0:{d}\n", .{config.port});
@@ -3498,8 +3498,8 @@ pub const Server = struct {
 
         var sk_buf: i32 = 8 * 1024 * 1024;
         const sk_opt = std.mem.asBytes(&sk_buf);
-        std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, sk_opt) catch {};
-        std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, sk_opt) catch {};
+        compat.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, sk_opt);
+        compat.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, sk_opt);
         setupEcnSocket(sock);
 
         var retry_secret: [32]u8 = undefined;
@@ -9012,8 +9012,8 @@ pub const Client = struct {
 
         var sk_buf: i32 = 8 * 1024 * 1024;
         const sk_opt = std.mem.asBytes(&sk_buf);
-        std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, sk_opt) catch {};
-        std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, sk_opt) catch {};
+        compat.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, sk_opt);
+        compat.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, sk_opt);
         setupEcnSocket(sock);
         const bind_any = compat.Address.parseIp4("0.0.0.0", 0) catch unreachable;
         try compat.bind(sock, &bind_any.any, bind_any.getOsSockLen());
@@ -9077,8 +9077,8 @@ pub const Client = struct {
     ) !void {
         var sk_buf: i32 = 8 * 1024 * 1024;
         const sk_opt = std.mem.asBytes(&sk_buf);
-        std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, sk_opt) catch {};
-        std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, sk_opt) catch {};
+        compat.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, sk_opt);
+        compat.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, sk_opt);
         setupEcnSocket(sock);
 
         const dcid = ConnectionId.random(compat.random, 18);
@@ -9127,8 +9127,8 @@ pub const Client = struct {
     ) !void {
         var sk_buf: i32 = 8 * 1024 * 1024;
         const sk_opt = std.mem.asBytes(&sk_buf);
-        std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, sk_opt) catch {};
-        std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, sk_opt) catch {};
+        compat.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, sk_opt);
+        compat.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, sk_opt);
         setupEcnSocket(sock);
         const bind_any = compat.Address.parseIp4("0.0.0.0", 0) catch unreachable;
         try compat.bind(sock, &bind_any.any, bind_any.getOsSockLen());
@@ -10272,8 +10272,8 @@ pub const Client = struct {
 
         var sk_buf: i32 = 8 * 1024 * 1024;
         const sk_opt = std.mem.asBytes(&sk_buf);
-        std.posix.setsockopt(self.sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, sk_opt) catch {};
-        std.posix.setsockopt(self.sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, sk_opt) catch {};
+        compat.setsockopt(self.sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, sk_opt);
+        compat.setsockopt(self.sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, sk_opt);
         setupEcnSocket(self.sock);
         const bind_any = compat.Address.parseIp4("0.0.0.0", 0) catch unreachable;
         try compat.bind(self.sock, &bind_any.any, bind_any.getOsSockLen());
@@ -12265,8 +12265,8 @@ pub const Client = struct {
         };
         var sk_buf: i32 = 8 * 1024 * 1024;
         const sk_opt = std.mem.asBytes(&sk_buf);
-        std.posix.setsockopt(new_sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, sk_opt) catch {};
-        std.posix.setsockopt(new_sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, sk_opt) catch {};
+        compat.setsockopt(new_sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, sk_opt);
+        compat.setsockopt(new_sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, sk_opt);
         setupEcnSocket(new_sock);
 
         compat.close(self.sock);
