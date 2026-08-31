@@ -15,6 +15,37 @@ const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
 const system = posix.system;
+const is_windows = builtin.os.tag == .windows;
+
+const win = struct {
+	const SOCKET = usize;
+	const INVALID_SOCKET: SOCKET = std.math.maxInt(SOCKET);
+
+	extern "ws2_32" fn socket(af: c_uint, kind: c_uint, protocol: c_uint) callconv(.winapi) SOCKET;
+	extern "ws2_32" fn closesocket(s: SOCKET) callconv(.winapi) c_int;
+
+    extern "bcrypt" fn BCryptGenRandom(
+        hAlgorithm: ?*anyopaque,
+        pbBuffer: [*]u8,
+        cbBuffer: u32,
+        dwFlags: u32,
+    ) callconv(.winapi) i32;
+    const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x00000002;
+
+    extern "kernel32" fn GetSystemTimePreciseAsFileTime(lpFileTime: *u64) callconv(.winapi) void;
+    /// 100 ns FILETIME units between 1601-01-01 and the 1970-01-01 Unix epoch.
+    const UNIX_EPOCH_OFFSET_100NS: u64 = 116444736000000000;
+
+    // CRT `_open` flags from <fcntl.h>, stable in every MSVC and mingw release.
+    const O_RDONLY: c_int = 0x0000;
+    const O_WRONLY: c_int = 0x0001;
+    const O_RDWR: c_int = 0x0002;
+    const O_CREAT: c_int = 0x0100;
+    const O_TRUNC: c_int = 0x0200;
+    const O_EXCL: c_int = 0x0400;
+    const O_BINARY: c_int = 0x8000;
+    extern "c" fn _open(path: [*:0]const u8, oflag: c_int, ...) c_int;
+};
 
 // ── Errno helper ────────────────────────────────────────────────────────────
 
@@ -35,7 +66,12 @@ pub const SocketError = error{
 } || posix.UnexpectedError;
 
 pub fn socket(domain: u32, sock_type: u32, protocol: u32) SocketError!posix.socket_t {
-    const rc = system.socket(domain, sock_type, protocol);
+    if (comptime is_windows) {
+		const s = win.socket(domain, sock_type, protocol);
+		if (s == win.INVALID_SOCKET) return error.SystemResources;
+		return @ptrFromInt(s);
+	}
+	const rc = system.socket(domain, sock_type, protocol);
     switch (checkRc(rc)) {
         .SUCCESS => return @intCast(rc),
         .ACCES => return error.AccessDenied,
@@ -47,6 +83,16 @@ pub fn socket(domain: u32, sock_type: u32, protocol: u32) SocketError!posix.sock
         .PROTONOSUPPORT => return error.ProtocolUnsupportedBySystem,
         else => |err| return posix.unexpectedErrno(err),
     }
+}
+
+pub fn setsockopt(sock: posix.socket_t, level: u32, optname: u32, value: []const u8) void {
+    _ = system.setsockopt(
+        sock,
+        @intCast(level),
+        @intCast(optname),
+        @as([*]const u8, @ptrCast(value.ptr)),
+        @intCast(value.len),
+    );
 }
 
 pub const BindError = error{
@@ -184,7 +230,12 @@ pub fn recvfrom(
 }
 
 pub fn close(sock: posix.socket_t) void {
-    _ = system.close(sock);
+    if (comptime is_windows) {
+        // Windows sockets must be closed with `closesocket`, not the CRT `close`.
+        _ = win.closesocket(@intFromPtr(sock));
+    } else {
+        _ = system.close(sock);
+    }
 }
 
 // ── CSPRNG ──────────────────────────────────────────────────────────────────
@@ -226,6 +277,13 @@ fn osRandomBytes(buf: []u8) void {
                 @panic("getrandom failed");
             }
         }
+    } else if (comptime is_windows) {
+		// Windows — no `arc4random_buf`; `BCryptGenRandom` (bcrypt.dll) is the
+		// system CSPRNG. Zig's std does not wrap it, so bind the one entry
+		// point directly (auto-links bcrypt.lib from the mingw sysroot).
+		if (win.BCryptGenRandom(null, buf.ptr, @intCast(buf.len), win.BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+			@panic("BCryptGenRandom failed");
+		}
     } else {
         // Darwin (and other libc-linked targets) — `arc4random_buf` is always
         // available, never fails, and is the recommended CSPRNG on macOS.
@@ -262,6 +320,14 @@ pub fn nanoTimestamp() i128 {
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(.REALTIME, &ts);
         return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
+    } else if (comptime is_windows) {
+		// Windows — no `clock_gettime`. `GetSystemTimePreciseAsFileTime` gives a
+		// 100 ns FILETIME (u64) since 1601-01-01; rebase to the Unix epoch and
+		// scale to ns. Precise variant (sub-microsecond, Win8+) rather than the
+		// ~15.6 ms `GetSystemTimeAsFileTime` because RTT estimation uses this.
+		var ft: u64 = 0;
+		win.GetSystemTimePreciseAsFileTime(&ft);
+		return @as(i128, ft -| win.UNIX_EPOCH_OFFSET_100NS) * 100;
     } else {
         var ts: std.c.timespec = undefined;
         _ = std.c.clock_gettime(.REALTIME, &ts);
@@ -585,7 +651,12 @@ pub const fs = struct {
         mode: posix.mode_t = 0o644,
     };
 
-    fn openZ(path: [*:0]const u8, flags: posix.O, mode: posix.mode_t) !posix.fd_t {
+    fn openZ(path: [*:0]const u8, flags: if (is_windows) c_int else posix.O, mode: posix.mode_t) !posix.fd_t {
+		if (comptime is_windows) {
+			const rc = win._open(path, flags, @as(c_int, @intCast(mode)));
+			if (rc < 0) return posix.unexpectedErrno(posix.errno(rc));
+			return @ptrFromInt(@as(usize, @intCast(rc)));
+		}
         while (true) {
             const rc = system.open(path, flags, mode);
             switch (checkRc(rc)) {
@@ -616,6 +687,14 @@ pub const fs = struct {
     pub fn openFileAbsolute(path: []const u8, flags: OpenFlags) !File {
         var path_buf: [4096]u8 = undefined;
         const c_path = try nullTerminate(path, &path_buf);
+		if (comptime is_windows) {
+			const oflag: c_int = switch (flags.mode) {
+				.read_only => win.O_RDONLY,
+				.write_only => win.O_WRONLY,
+				.read_write => win.O_RDWR,
+			} | win.O_BINARY;
+			return .{ .handle = try openZ(c_path, oflag, 0o644) };
+		}
         const access: posix.ACCMODE = switch (flags.mode) {
             .read_only => .RDONLY,
             .write_only => .WRONLY,
@@ -628,6 +707,13 @@ pub const fs = struct {
     pub fn createFileAbsolute(path: []const u8, flags: CreateFlags) !File {
         var path_buf: [4096]u8 = undefined;
         const c_path = try nullTerminate(path, &path_buf);
+		if (comptime is_windows) {
+            var oflag: c_int = win.O_CREAT | win.O_BINARY |
+                (if (flags.read) win.O_RDWR else win.O_WRONLY);
+            if (flags.truncate) oflag |= win.O_TRUNC;
+            if (flags.exclusive) oflag |= win.O_EXCL;
+            return .{ .handle = try openZ(c_path, oflag, flags.mode) };
+        }
         const oflag: posix.O = .{
             .ACCMODE = if (flags.read) .RDWR else .WRONLY,
             .CREAT = true,
