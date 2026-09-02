@@ -36,6 +36,167 @@ const win = struct {
     /// 100 ns FILETIME units between 1601-01-01 and the 1970-01-01 Unix epoch.
     const UNIX_EPOCH_OFFSET_100NS: u64 = 116444736000000000;
 
+	// ── High-resolution wall clock, Windows 7 compatible ────────────────────
+	//
+	// `GetSystemTimePreciseAsFileTime` exists only on Windows 8 / Server 2012
+	// and newer. Importing it *statically* makes the whole executable fail to
+	// load on Windows 7 with "The procedure entry point
+	// GetSystemTimePreciseAsFileTime could not be located in the dynamic link
+	// library KERNEL32.dll", so it is resolved at runtime instead: modern
+	// systems keep using the precise API, older ones fall back to a
+	// `QueryPerformanceCounter` + `GetSystemTimeAsFileTime` hybrid.
+	//
+	// Why QPC: `GetSystemTimeAsFileTime` alone is refreshed by the system tick
+    // (typically 15.6 ms) which is far too coarse for RTT estimation, while
+    // QPC is a monotonic counter with sub-microsecond resolution available in
+    // every Windows since Win2k. Neither is a wall clock on its own, so the two
+    // are combined:
+    //
+    //     now = FILETIME_anchor  (QPC_now - QPC_anchor) * 10_000_000 / QPC_freq
+    //
+    // The anchor is periodically re-taken from `GetSystemTimeAsFileTime` (once
+    // per second at most, and only when the drift exceeds `MAX_DRIFT_100NS`)
+    // which bounds QPC crystal drift and absorbs clock steps and
+    // suspend/resume without ever moving the reported time backwards in
+    // normal operation.
+	extern "kernel32" fn QueryPerformanceCounter(lpPerformanceCount: *i64) callconv(.winapi) i32;
+	extern "kernel32" fn QueryPerformanceFrequency(lpFrequency: *i64) callconv(.winapi) i32;
+	extern "kernel32" fn GetSystemTimeAsFileTime(lpSystemTimeAsFileTime: *u64) callconv(.winapi) void;
+	extern "kernel32" fn GetModuleHandleW(lpModuleName: [*:0]const u16) callconv(.winapi) ?*anyopaque;
+	extern "kernel32" fn GetProcAddress(hModule: ?*anyopaque, lpProcName: [*:0]const u8) callconv(.winapi) ?*anyopaque;
+
+	const PreciseFileTimeFn = *const fn (*u64) callconv(.winapi) void;
+	const kernel32_dll_w = std.unicode.utf8ToUtf16LeStringLiteral("kernel32.dll");
+
+	/// How often the QPC anchor is validated against the system clock (1 s).
+	const ANCHOR_CHECK_100NS: u64 = 10_000_000;
+    /// Drift/offset that is treated as a clock step or suspend-resume rather
+    /// than normal crystal drift: 500 ms.
+    const MAX_DRIFT_100NS: u64 = 5_000_000;
+
+    const Clock = struct {
+        const UNINIT: u32 = 0;
+        const INITIALIZING: u32 = 1;
+        const PRECISE: u32 = 2;
+        const FALLBACK: u32 = 3;
+
+        var state: std.atomic.Value(u32) = .init(UNINIT);
+        var precise: ?PreciseFileTimeFn = null;
+
+        // QPC fallback state. Published through `state`; the anchor pair is
+        // only rewritten under `lock` (at most once per second).
+        var anchor_ft: std.atomic.Value(u64) = .init(0);
+        var anchor_qpc: std.atomic.Value(i64) = .init(0);
+        var qpc_freq: i64 = 1;
+        var next_check_ft: std.atomic.Value(u64) = .init(0);
+
+        // Tiny spinlock: it guards a ~1 us critical section that runs at most
+        // once per second, so spinning is cheaper than a kernel mutex and
+        // avoids depending on the std threading API.
+        var lock: std.atomic.Value(u32) = .init(0);
+
+		fn lockSlow() void {
+			while (lock.swap(1, .acquire) != 0) std.atomic.spinLoopHint();
+		}
+		fn unlockFast() void {
+			lock.store(0, .release);
+		}
+
+		fn ensureInit() void {
+			var s = state.load(.acquire);
+			while (true) {
+				switch (s) {
+					UNINIT => {
+						if (state.cmpxchgWeak(UNINIT, INITIALIZING, .acquire, .monotonic)) |observed| {
+							s = observed;
+							continue;
+						}
+						calibrate();
+						state.store(if (precise != null) PRECISE else FALLBACK, .release);
+						return;
+					},
+					INITIALIZING => {
+						std.atomic.spinLoopHint();
+						s = state.load(.acquire);
+					},
+					else => return,
+				}
+			}
+		}
+
+		fn calibrate() void {
+			// Look the precise API up at runtime: present on Windows 8+, absent
+			// on Windows Vista / 7 / Server 2008 R2.
+			if (GetModuleHandleW(kernel32_dll_w)) |mod| {
+				if (GetProcAddress(mod, "GetSystemTimePreciseAsFileTime")) |proc| {
+					precise = @as(PreciseFileTimeFn, @ptrCast(proc));
+				}
+			}
+			var freq: i64 = 0;
+			if (QueryPerformanceFrequency(&freq) != 0 and freq > 0) qpc_freq = freq;
+			reanchor();
+		}
+
+		/// Take a fresh (FILETIME, QPC) anchor pair.
+		fn reanchor() void {
+			var ft: u64 = 0;
+			GetSystemTimeAsFileTime(&ft);
+			var qpc: i64 = 0;
+			if (QueryPerformanceCounter(&qpc) == 0) qpc = 0;
+			anchor_ft.store(ft, .release);
+			anchor_qpc.store(qpc, .release);
+			next_check_ft.store(ft +% ANCHOR_CHECK_100NS, .release);
+		}
+
+		/// Current FILETIME (100 ns since 1601-01-01), high resolution in every
+		/// Windows version from Win2k onwards.
+		fn filetime() u64 {
+			ensureInit();
+			if (precise) |f| {
+				var ft: u64 = 0;
+				f(&ft);
+				return ft;
+			}
+
+			var qpc: i64 = 0;
+			if (QueryPerformanceCounter(&qpc) == 0) {
+				// No QPC (should not happen since Win2k): coarse clock.
+				var ft: u64 = 0;
+				GetSystemTimeAsFileTime(&ft);
+				return ft;
+			}
+
+			const ft = anchor_ft.load(.monotonic) +%
+			    @as(u64, @bitCast(@divTrunc((qpc - anchor_qpc.load(.monotonic)) * 10_000_000, qpc_freq)));
+
+			if (ft -% next_check_ft.load(.monotonic) < ANCHOR_CHECK_100NS) return ft;
+
+			lockSlow();
+			defer unlockFast();
+			// Re-check: another thread may have re-anchored while we waited.
+			if (ft -% next_check_ft.load(.monotonic) >= ANCHOR_CHECK_100NS) {
+				var sys_ft: u64 = 0;
+				GetSystemTimeAsFileTime(&sys_ft);
+				var now_qpc: i64 = 0;
+				if (QueryPerformanceCounter(&now_qpc) == 0) now_qpc = qpc;
+				const diff = ft -% sys_ft;
+				if (diff > MAX_DRIFT_100NS or sys_ft -% ft > MAX_DRIFT_100NS) {
+					// Clock stepped (NTP correction, manual change, DST) or the
+					// machine resumed from suspend: hard re-anchor.
+					anchor_ft.store(sys_ft, .release);
+				} else {
+					// Ordinary crystal drift: correct the anchor while keeping
+					// the value we are about to return, so the clock stays
+					// monotonic and continuous.
+					anchor_ft.store(sys_ft +% diff, .release);
+				}
+				anchor_qpc.store(now_qpc, .release);
+				next_check_ft.store(ft +% ANCHOR_CHECK_100NS, .release);
+			}
+			return ft;
+		}
+	};
+
     // CRT `_open` flags from <fcntl.h>, stable in every MSVC and mingw release.
     const O_RDONLY: c_int = 0x0000;
     const O_WRONLY: c_int = 0x0001;
@@ -321,12 +482,13 @@ pub fn nanoTimestamp() i128 {
         _ = std.os.linux.clock_gettime(.REALTIME, &ts);
         return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
     } else if (comptime is_windows) {
-		// Windows — no `clock_gettime`. `GetSystemTimePreciseAsFileTime` gives a
-		// 100 ns FILETIME (u64) since 1601-01-01; rebase to the Unix epoch and
-		// scale to ns. Precise variant (sub-microsecond, Win8+) rather than the
-		// ~15.6 ms `GetSystemTimeAsFileTime` because RTT estimation uses this.
-		var ft: u64 = 0;
-		win.GetSystemTimePreciseAsFileTime(&ft);
+		// Windows — no `clock_gettime`. A FILETIME (100 ns since 1601-01-01) is
+		// rebased to the Unix epoch and scaled to ns. `win.Clock.filetime()`
+		// resolves `GetSystemTimePreciseAsFileTime` at runtime and falls back to a
+		// `QueryPerformanceCounter` + `GetSystemTimeAsFileTime` hybrid on Windows
+		// 7 and older, which keeps the resolution needed for RTT estimation
+		// instead of the ~15.6 ms granularity of `GetSystemTimeAsFileTime`.
+		const ft = win.Clock.filetime();
 		return @as(i128, ft -| win.UNIX_EPOCH_OFFSET_100NS) * 100;
     } else {
         var ts: std.c.timespec = undefined;
