@@ -32,7 +32,6 @@ const win = struct {
     ) callconv(.winapi) i32;
     const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x00000002;
 
-    extern "kernel32" fn GetSystemTimePreciseAsFileTime(lpFileTime: *u64) callconv(.winapi) void;
     /// 100 ns FILETIME units between 1601-01-01 and the 1970-01-01 Unix epoch.
     const UNIX_EPOCH_OFFSET_100NS: u64 = 116444736000000000;
 
